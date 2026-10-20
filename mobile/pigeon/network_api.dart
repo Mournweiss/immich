@@ -21,8 +21,7 @@ class ClientCertPrompt {
     dartOut: 'lib/platform/network_api.g.dart',
     swiftOut: 'ios/Runner/Core/Network.g.swift',
     swiftOptions: SwiftOptions(includeErrorClass: false),
-    kotlinOut:
-        'android/app/src/main/kotlin/app/alextran/immich/core/Network.g.kt',
+    kotlinOut: 'android/app/src/main/kotlin/app/alextran/immich/core/Network.g.kt',
     kotlinOptions: KotlinOptions(package: 'app.alextran.immich.core', includeErrorClass: true),
     dartOptions: DartOptions(),
     dartPackageName: 'immich_mobile',
@@ -46,4 +45,6 @@ abstract class NetworkApi {
   void setRequestHeaders(Map<String, String> headers, List<String> serverUrls, String? token);
 
   String getAppGroupId();
+
+  List<String> getTrustedDomains();
 }

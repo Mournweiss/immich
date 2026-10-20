@@ -11,18 +11,18 @@ import app.alextran.immich.INITIAL_BUFFER_SIZE
 import app.alextran.immich.NativeBuffer
 import app.alextran.immich.NativeByteBuffer
 import app.alextran.immich.core.HttpClientManager
-import kotlinx.coroutines.*
+import app.alextran.immich.core.SslContextProvider
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.Cache
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
-import org.chromium.net.CronetException
-import org.chromium.net.UrlRequest
-import org.chromium.net.UrlResponseInfo
-import java.io.EOFException
 import java.io.File
+import java.io.EOFException
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
@@ -176,7 +176,7 @@ class RemoteImagesImpl(context: Context) : RemoteImageApi {
   }
 
   override fun clearCache(callback: (Result<Long>) -> Unit) {
-    CoroutineScope(Dispatchers.IO).launch {
+    kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
       try {
         ImageFetcherManager.clearCache(callback)
       } catch (e: Exception) {
@@ -224,11 +224,9 @@ private object ImageFetcherManager {
   }
 
   private fun build(): ImageFetcher {
-    return if (HttpClientManager.isMtls) {
-      OkHttpImageFetcher.create(cacheDir)
-    } else {
-      CronetImageFetcher()
-    }
+    // Always use OkHttp for SSL handling across all network operations.
+    // Cronet does not support custom TrustManager and hostnameVerifier for trusted domains.
+    return OkHttpImageFetcher.create(cacheDir)
   }
 }
 
@@ -243,161 +241,6 @@ private sealed interface ImageFetcher {
   fun drain()
 
   fun clearCache(onCleared: (Result<Long>) -> Unit)
-}
-
-private class CronetImageFetcher : ImageFetcher {
-  private val stateLock = Any()
-  private var activeCount = 0
-  private var draining = false
-  private var onCacheCleared: ((Result<Long>) -> Unit)? = null
-
-  override fun fetch(
-    url: String,
-    signal: CancellationSignal,
-    onSuccess: (NativeByteBuffer, String?) -> Unit,
-    onFailure: (Exception) -> Unit,
-  ) {
-    synchronized(stateLock) {
-      if (draining) {
-        onFailure(IllegalStateException("Engine is draining"))
-        return
-      }
-      activeCount++
-    }
-
-    val callback = FetchCallback(onSuccess, onFailure, ::onComplete)
-    val requestBuilder = HttpClientManager.cronetEngine!!
-      .newUrlRequestBuilder(url, callback, HttpClientManager.cronetExecutor)
-    HttpClientManager.getAuthHeaders(url).forEach { (key, value) ->
-      requestBuilder.addHeader(key, value)
-    }
-    val request = requestBuilder.build()
-    signal.setOnCancelListener(request::cancel)
-    request.start()
-  }
-
-  private fun onComplete() {
-    val didDrain = synchronized(stateLock) {
-      activeCount--
-      draining && activeCount == 0
-    }
-    if (didDrain) {
-      onDrained()
-    }
-  }
-
-  override fun drain() {
-    val didDrain = synchronized(stateLock) {
-      if (draining) return
-      draining = true
-      activeCount == 0
-    }
-    if (didDrain) {
-      onDrained()
-    }
-  }
-
-  private fun onDrained() {
-    val onCacheCleared = synchronized(stateLock) {
-      val onCacheCleared = this.onCacheCleared
-      this.onCacheCleared = null
-      onCacheCleared
-    } ?: return
-
-    CoroutineScope(Dispatchers.IO).launch {
-      val result = HttpClientManager.rebuildCronetEngine()
-      synchronized(stateLock) { draining = false }
-      onCacheCleared(result)
-    }
-  }
-
-  override fun clearCache(onCleared: (Result<Long>) -> Unit) {
-    synchronized(stateLock) {
-      if (onCacheCleared != null) {
-        return onCleared(Result.success(-1))
-      }
-      onCacheCleared = onCleared
-    }
-    drain()
-  }
-
-  private class FetchCallback(
-    private val onSuccess: (NativeByteBuffer, String?) -> Unit,
-    private val onFailure: (Exception) -> Unit,
-    private val onComplete: () -> Unit,
-  ) : UrlRequest.Callback() {
-    private var buffer: NativeByteBuffer? = null
-    private var error: Exception? = null
-
-    override fun onRedirectReceived(request: UrlRequest, info: UrlResponseInfo, newUrl: String) {
-      request.followRedirect()
-    }
-
-    override fun onResponseStarted(request: UrlRequest, info: UrlResponseInfo) {
-      if (info.httpStatusCode !in 200..299) {
-        error = IOException("HTTP ${info.httpStatusCode}: ${info.httpStatusText}")
-        return request.cancel()
-      }
-
-      try {
-        // Content-Length is a size hint only. With Content-Encoding (gzip/br/...),
-        // Cronet auto-decompresses and writes decompressed bytes to our buffer, which
-        // may exceed the wire/compressed Content-Length. Always use the growable
-        // buffer path so we can't overflow.
-        val contentLength = info.allHeaders["content-length"]?.firstOrNull()?.toIntOrNull() ?: 0
-        // Cap the up-front alloc: Content-Length is untrusted and can be huge or near
-        // Int.MAX_VALUE (overflowing `+1`). For larger responses the grow path takes over.
-        val initialSize = if (contentLength in 1..MAX_PREALLOC_BYTES) contentLength + 1 else INITIAL_BUFFER_SIZE
-        buffer = NativeByteBuffer(initialSize)
-        request.read(buffer!!.wrapRemaining())
-      } catch (e: Exception) {
-        error = e
-        return request.cancel()
-      }
-    }
-
-    override fun onReadCompleted(
-      request: UrlRequest,
-      info: UrlResponseInfo,
-      byteBuffer: ByteBuffer
-    ) {
-      try {
-        // Always pass a fresh wrap so byteBuffer.position() represents only the
-        // bytes Cronet wrote in this iteration. Reusing the caller-supplied
-        // ByteBuffer breaks advance(): Cronet's position keeps accumulating
-        // across reads, which would double-count previous iterations' bytes.
-        val buf = buffer!!.run {
-          advance(byteBuffer.position())
-          ensureHeadroom()
-          wrapRemaining()
-        }
-        request.read(buf)
-      } catch (e: Exception) {
-        error = e
-        return request.cancel()
-      }
-    }
-
-    override fun onSucceeded(request: UrlRequest, info: UrlResponseInfo) {
-      val contentType = info.allHeaders.entries
-        .firstOrNull { it.key.equals("content-type", ignoreCase = true) }?.value?.firstOrNull()
-      onSuccess(buffer!!, contentType)
-      onComplete()
-    }
-
-    override fun onFailed(request: UrlRequest, info: UrlResponseInfo?, error: CronetException) {
-      buffer?.free()
-      onFailure(error)
-      onComplete()
-    }
-
-    override fun onCanceled(request: UrlRequest, info: UrlResponseInfo?) {
-      buffer?.free()
-      onFailure(error ?: OperationCanceledException())
-      onComplete()
-    }
-  }
-
 }
 
 private class OkHttpImageFetcher private constructor(

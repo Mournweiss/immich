@@ -78,7 +78,7 @@ fun RandomConfiguration(context: Context, appWidgetId: Int, glanceId: GlanceId, 
       return@LaunchedEffect
     }
 
-    val api = ImmichAPI(serverCfg)
+    val api = ImmichAPI(context, serverCfg)
 
     val currentState = getAppWidgetState(context, PreferencesGlanceStateDefinition, glanceId)
     val currentAlbumId = currentState[kSelectedAlbum] ?: "NONE"

@@ -109,5 +109,6 @@ final versionWarningPresentProvider = Provider.family<bool, UserDto?>((ref, user
     VersionStatus.clientOutOfDate || VersionStatus.error => true,
     VersionStatus.serverOutOfDate => serverInfo.latestVersion != null && (user?.isAdmin ?? false),
     VersionStatus.upToDate => false,
+    _ => false,
   };
 });

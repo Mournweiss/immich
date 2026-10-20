@@ -167,7 +167,7 @@ class ImageDownloadWorker(
     serverConfig: ServerConfig,
     widgetConfig: Preferences
   ): WidgetEntry {
-    val api = ImmichAPI(serverConfig)
+    val api = ImmichAPI(context, serverConfig)
 
     val filters = SearchFilters()
     val albumId = widgetConfig[kSelectedAlbum]
@@ -203,7 +203,7 @@ class ImageDownloadWorker(
   private suspend fun fetchMemory(
     serverConfig: ServerConfig
   ): WidgetEntry {
-    val api = ImmichAPI(serverConfig)
+    val api = ImmichAPI(context, serverConfig)
 
     val today = LocalDate.now()
     val memories = api.fetchMemory(today)

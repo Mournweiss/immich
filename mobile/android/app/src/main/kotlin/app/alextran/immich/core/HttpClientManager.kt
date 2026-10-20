@@ -7,8 +7,6 @@ import androidx.annotation.OptIn
 import androidx.core.content.edit
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
-import androidx.media3.datasource.ResolvingDataSource
-import androidx.media3.datasource.cronet.CronetDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import app.alextran.immich.BuildConfig
 import app.alextran.immich.NativeBuffer
@@ -22,7 +20,6 @@ import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
-import org.chromium.net.CronetEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -44,12 +41,8 @@ import java.security.KeyStore
 import java.security.Principal
 import java.security.PrivateKey
 import java.security.cert.X509Certificate
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.HttpsURLConnection
-import javax.net.ssl.SSLContext
-import javax.net.ssl.TrustManagerFactory
 import javax.net.ssl.X509KeyManager
 import javax.net.ssl.X509TrustManager
 
@@ -88,11 +81,6 @@ object HttpClientManager {
   private lateinit var client: OkHttpClient
   private lateinit var appContext: Context
   private lateinit var prefs: SharedPreferences
-
-  var cronetEngine: CronetEngine? = null
-    private set
-  private lateinit var cronetStorageDir: File
-  val cronetExecutor: ExecutorService = Executors.newFixedThreadPool(4)
 
   private val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
 
@@ -153,9 +141,6 @@ object HttpClientManager {
 
       val cacheDir = File(File(context.cacheDir, "okhttp"), "api")
       client = build(cacheDir)
-
-      cronetStorageDir = File(context.cacheDir, "cronet").apply { mkdirs() }
-      cronetEngine = buildCronetEngine()
 
       initialized = true
     }
@@ -285,42 +270,20 @@ object HttpClientManager {
     return result
   }
 
-  suspend fun rebuildCronetEngine(): Result<Long> {
-    return runCatching {
-      cronetEngine?.shutdown()
-      val deletionResult = deleteFolderAndGetSize(cronetStoragePath.toPath())
-      cronetEngine = buildCronetEngine()
-      deletionResult
-    }
-  }
-
-  val cronetStoragePath: File get() = cronetStorageDir
-
+  /**
+   * Create a DataSource factory for media streaming via OkHttpDataSource.
+   */
   @OptIn(UnstableApi::class)
   fun createDataSourceFactory(headers: Map<String, String>): DataSource.Factory {
-    return if (isMtls) {
-      OkHttpDataSource.Factory(client.newBuilder().cache(null).build())
-    } else {
-      ResolvingDataSource.Factory(
-        CronetDataSource.Factory(cronetEngine!!, cronetExecutor)
-      ) { dataSpec ->
-        val newHeaders = dataSpec.httpRequestHeaders.toMutableMap()
-        newHeaders.putAll(getAuthHeaders(dataSpec.uri.toString()))
-        newHeaders["Cache-Control"] = "no-store"
-        dataSpec.buildUpon().setHttpRequestHeaders(newHeaders).build()
-      }
-    }
+    return OkHttpDataSource.Factory(client.newBuilder().cache(null).build())
   }
 
-  fun buildCronetEngine(): CronetEngine {
-    return CronetEngine.Builder(appContext)
-      .enableHttp2(true)
-      .enableQuic(true)
-      .enableBrotli(true)
-      .setStoragePath(cronetStorageDir.absolutePath)
-      .setUserAgent(USER_AGENT)
-      .enableHttpCache(CronetEngine.Builder.HTTP_CACHE_DISK, MEDIA_CACHE_SIZE_BYTES)
-      .build()
+  /**
+   * Get the list of hardcoded trusted domains that accept self-signed certificates.
+   * Returns an empty list if no trusted domains are configured.
+   */
+  fun getTrustedDomains(): List<String> {
+    return TRUSTED_DOMAINS.toList().sorted()
   }
 
   private suspend fun deleteFolderAndGetSize(root: Path): Long = withContext(Dispatchers.IO) {
@@ -344,6 +307,9 @@ object HttpClientManager {
     totalSize
   }
 
+  /**
+   * Build OkHttpClient with SSL configuration for trusted domains.
+   */
   private fun build(cacheDir: File): OkHttpClient {
     val connectionPool = ConnectionPool(
       maxIdleConnections = KEEP_ALIVE_CONNECTIONS,
@@ -351,12 +317,11 @@ object HttpClientManager {
       timeUnit = TimeUnit.MINUTES
     )
 
-    val managerFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
-    managerFactory.init(null as KeyStore?)
-    val trustManager = managerFactory.trustManagers.filterIsInstance<X509TrustManager>().first()
+    // Use unified SSL context provider
+    val sslResult = SslContextProvider.createSslContext()
+    val sslContext = sslResult.sslContext
+    val systemTrustManager = sslResult.systemTrustManager
 
-    val sslContext = SSLContext.getInstance("TLS")
-      .apply { init(arrayOf(DynamicKeyManager()), arrayOf(trustManager), null) }
     HttpsURLConnection.setDefaultSSLSocketFactory(sslContext.socketFactory)
 
     return OkHttpClient.Builder()
@@ -375,7 +340,8 @@ object HttpClientManager {
       .connectionPool(connectionPool)
       .dispatcher(Dispatcher().apply { maxRequestsPerHost = MAX_REQUESTS_PER_HOST })
       .cache(Cache(cacheDir.apply { mkdirs() }, CACHE_SIZE_BYTES))
-      .sslSocketFactory(sslContext.socketFactory, trustManager)
+      .sslSocketFactory(sslContext.socketFactory, systemTrustManager)
+      .hostnameVerifier(SslContextProvider.createHostnameVerifier())
       .build()
   }
 
