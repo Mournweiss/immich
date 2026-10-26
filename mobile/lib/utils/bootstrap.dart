@@ -9,6 +9,7 @@ import 'package:immich_mobile/generated/translations.g.dart';
 import 'package:immich_mobile/infrastructure/repositories/log.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/network.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/settings.repository.dart';
+import 'package:immich_mobile/platform/network_api.g.dart';
 import 'package:immich_mobile/services/api.service.dart';
 import 'package:logging/logging.dart';
 import 'package:photo_manager/photo_manager.dart';
@@ -54,6 +55,9 @@ abstract final class Bootstrap {
     bool disableStoreWatching = false,
   }) async {
     await NetworkRepository.init();
+
+    final networkApi = NetworkApi();
+    await networkApi.initSsl();
 
     final apiService = ApiService();
     final (dataController, loggerDatabaseWasRecreated) = await DataController.init(

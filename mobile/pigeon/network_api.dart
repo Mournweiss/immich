@@ -47,4 +47,7 @@ abstract class NetworkApi {
   String getAppGroupId();
 
   List<String> getTrustedDomains();
+
+  @async
+  void initSsl();
 }

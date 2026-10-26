@@ -90,6 +90,42 @@ object SslContextProvider {
   }
 
   /**
+   * Apply unified SSL configuration to a standalone OkHttpClient.Builder.
+   * This is the primary method for configuring external HTTP clients
+   * (e.g., background_downloader) with the same SSL settings as the app.
+   *
+   * @param builder The OkHttpClient.Builder to configure
+   * @return The configured builder (same instance for chaining)
+   */
+  fun applyToOkHttpClientBuilder(builder: OkHttpClient.Builder): OkHttpClient.Builder {
+    val result = createSslContext()
+
+    builder
+      .sslSocketFactory(result.sslContext.socketFactory, result.systemTrustManager)
+      .hostnameVerifier(createHostnameVerifier())
+
+    return builder
+  }
+
+  /**
+   * Set global default SSL socket factory and hostname verifier for all
+   * HttpsURLConnection instances (used by background_downloader internally).
+   */
+  fun applyAsGlobalDefaults() {
+    val result = createSslContext()
+    HttpsURLConnection.setDefaultSSLSocketFactory(result.sslContext.socketFactory)
+    HttpsURLConnection.setDefaultHostnameVerifier(createHostnameVerifier())
+  }
+
+  /**
+   * Reset global defaults to system values.
+   */
+  fun resetGlobalDefaults() {
+    HttpsURLConnection.setDefaultSSLSocketFactory(null)
+    HttpsURLConnection.setDefaultHostnameVerifier(null)
+  }
+
+  /**
    * Result holder for SSL context creation.
    */
   data class SslContextResult(

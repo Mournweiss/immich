@@ -88,4 +88,9 @@ private class NetworkApiImpl(private val context: Context) : NetworkApi {
   override fun getTrustedDomains(): List<String> {
     return HttpClientManager.getTrustedDomains()
   }
+
+  override fun initSsl() {
+    // Apply SSL context as global defaults
+    SslContextProvider.applyAsGlobalDefaults()
+  }
 }

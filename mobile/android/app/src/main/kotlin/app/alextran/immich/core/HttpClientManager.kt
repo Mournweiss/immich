@@ -322,7 +322,9 @@ object HttpClientManager {
     val sslContext = sslResult.sslContext
     val systemTrustManager = sslResult.systemTrustManager
 
+    // Set global SSL defaults for background_downloader and other external HTTP clients
     HttpsURLConnection.setDefaultSSLSocketFactory(sslContext.socketFactory)
+    HttpsURLConnection.setDefaultHostnameVerifier(SslContextProvider.createHostnameVerifier())
 
     return OkHttpClient.Builder()
       .cookieJar(cookieJar)
